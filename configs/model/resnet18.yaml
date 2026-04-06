@@ -1,0 +1,3 @@
+_target_: src.models.model.ResNet18Model
+num_classes: ${data.train.num_classes}
+pretrained: true

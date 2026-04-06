@@ -1,0 +1,56 @@
+defaults:
+  - dataset: imagenet
+  - model: resnet18
+  - optim: adamw
+  - loss: focal_loss
+  - _self_
+
+exp_name: exp001
+seed_value: 42
+max_epochs: 20
+accum_steps: 1
+val_epoch_freq: 5
+limit_train_batches: null
+limit_val_batches: null
+
+logging:
+  log_dir: logs/${exp_name}
+  log_freq: 10
+  log_level_primary: INFO
+  log_level_secondary: WARNING
+  all_ranks: false
+  tensorboard_writer:
+    _target_: src.utils.tensorboard_writer.TensorBoardLogger
+    path: ${logging.log_dir}/tensorboard
+  scalar_keys_to_log:
+    train:
+      keys_to_log:
+        - loss
+    val:
+      keys_to_log:
+        - loss
+
+checkpoint:
+  save_dir: logs/${exp_name}/ckpts
+  save_freq: 5
+  resume_checkpoint_path: null
+  strict: false
+
+distributed:
+  strategy: ddp
+  backend: nccl
+  find_unused_parameters: false
+  gradient_as_bucket_view: true
+  bucket_cap_mb: 25
+  broadcast_buffers: true
+  timeout_mins: 30
+  # FSDP-specific (only used when strategy=fsdp)
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    cpu_offload: false
+    min_num_params: 100000
+
+cuda:
+  cudnn_deterministic: false
+  cudnn_benchmark: false
+  allow_tf32: true
