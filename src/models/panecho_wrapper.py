@@ -1,0 +1,222 @@
+import importlib.util
+import logging
+import os
+import sys
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+
+from src.utils.general import is_dist_avail_and_initialized
+
+logger = logging.getLogger(__name__)
+
+PANECHO_NATIVE_CLIP_LEN = 16
+
+
+def load_panecho_isolated(clip_len=16):
+    """Loads PanEcho bypassing torch.hub to prevent namespace collisions using importlib."""
+    import timm
+    try:
+        import wandb
+        import pydantic
+    except ImportError:
+        pass
+
+    hub_dir = os.path.expanduser('~/.cache/torch/hub/CarDS-Yale_PanEcho_main')
+
+    orig_path = list(sys.path)
+    cwd = os.getcwd()
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+    sys.path = [p for p in sys.path if p and p not in (cwd, project_root, '')]
+
+    stashed_modules = {}
+    for mod_name in list(sys.modules.keys()):
+        if mod_name == 'src' or mod_name.startswith('src.'):
+            stashed_modules[mod_name] = sys.modules.pop(mod_name, None)
+
+    try:
+        if not os.path.exists(hub_dir):
+            try:
+                torch.hub.load(
+                    'CarDS-Yale/PanEcho', 'PanEcho',
+                    pretrained=False, trust_repo=True,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to pre-download PanEcho: {e}")
+
+        sys.path.insert(0, hub_dir)
+
+        is_distributed = is_dist_avail_and_initialized()
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+
+        if is_distributed and local_rank != 0:
+            dist.barrier()
+
+        # Load PanEcho from its hubconf directly
+        pt_path = os.path.join(hub_dir, 'hubconf.py')
+        spec = importlib.util.spec_from_file_location("panecho_hubconf", pt_path)
+        hubconf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hubconf)
+
+        import pandas as pd
+        orig_read_pickle = pd.read_pickle
+        orig_load_state_dict_from_url = torch.hub.load_state_dict_from_url
+
+        def mock_read_pickle(filepath_or_buffer, *args, **kwargs):
+            if isinstance(filepath_or_buffer, str) and 'tasks.pkl' in filepath_or_buffer:
+                return {}
+            return orig_read_pickle(filepath_or_buffer, *args, **kwargs)
+
+        def mock_load_state_dict_from_url(url, *args, **kwargs):
+            if 'panecho.pt' in url:
+                weights_path = os.path.join(project_root, 'model_card', 'panecho.pt')
+                if os.path.exists(weights_path):
+                    logger.info(f"Loading local PanEcho weights from {weights_path}")
+                    return torch.load(weights_path, map_location=kwargs.get('map_location', 'cpu'))
+                else:
+                    logger.warning(f"Local weights not found at {weights_path}. Falling back to URL.")
+            return orig_load_state_dict_from_url(url, *args, **kwargs)
+
+        try:
+            pd.read_pickle = mock_read_pickle
+            torch.hub.load_state_dict_from_url = mock_load_state_dict_from_url
+            model = hubconf.PanEcho(pretrained=True, clip_len=clip_len)
+        finally:
+            pd.read_pickle = orig_read_pickle
+            torch.hub.load_state_dict_from_url = orig_load_state_dict_from_url
+
+        if is_distributed and local_rank == 0:
+            dist.barrier()
+
+        return model
+    finally:
+        sys.path = orig_path
+
+        for mod_name in list(sys.modules.keys()):
+            if mod_name == 'src' or mod_name.startswith('src.'):
+                sys.modules.pop(mod_name, None)
+
+        for mod_name, mod_info in stashed_modules.items():
+            if mod_info is not None:
+                sys.modules[mod_name] = mod_info
+
+
+class PanEchoWrapper(nn.Module):
+    """Integrates PanEcho spatiotemporal feature extraction into the main pipeline.
+
+    Instantiated via Hydra ``_target_: src.models.panecho_wrapper.PanEchoWrapper``.
+    """
+
+    def __init__(self, clip_len=16, peft_cfg=None):
+        super().__init__()
+        self.native_clip_len = PANECHO_NATIVE_CLIP_LEN
+        self.model = load_panecho_isolated(clip_len=self.native_clip_len)
+        self.clip_len = clip_len
+        self.feature_dim = self.model.encoder.encoder.n_features
+
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        if peft_cfg and peft_cfg.get('enabled', True):
+            self._apply_peft(peft_cfg)
+
+    def _apply_peft(self, peft_cfg):
+        """Applies LoRA adapters to PanEcho transformer attention layers."""
+        try:
+            from peft import get_peft_model, LoraConfig
+
+            target_modules = peft_cfg.get(
+                'panecho_target_modules',
+                peft_cfg.get('target_modules', ['out_proj', 'in_proj_weight'])
+            )
+            lora_config = LoraConfig(
+                r=peft_cfg.get('rank', 8),
+                lora_alpha=peft_cfg.get('alpha', 16),
+                lora_dropout=peft_cfg.get('dropout', 0.05),
+                target_modules=target_modules,
+                bias="none",
+            )
+            self.model = get_peft_model(self.model, lora_config)
+
+            trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.model.parameters())
+            logger.info(
+                f"PanEcho PEFT applied: {trainable:,} trainable / {total:,} total "
+                f"({100 * trainable / total:.2f}%)"
+            )
+        except ImportError:
+            logger.warning("peft library not installed. Skipping LoRA for PanEcho.")
+
+    def _get_encoder(self):
+        """Resolves the encoder from the model, handling PEFT wrapping."""
+        model = self.model
+        if hasattr(model, 'base_model'):
+            model = model.base_model
+        if hasattr(model, 'model'):
+            model = model.model
+        return model.encoder
+
+    def _encode_chunk(self, frames_chunk):
+        """Encodes a single chunk of frames through PanEcho's spatial + temporal encoder.
+
+        Args:
+            frames_chunk (Tensor): (batch_size, channels, chunk_len, height, width)
+
+        Returns:
+            Tensor: Temporal features (batch_size, feature_dim, chunk_len)
+        """
+        encoder = self._get_encoder()
+        batch_size, channels, chunk_len, height, width = frames_chunk.shape
+        frames_reshaped = frames_chunk.reshape(batch_size * chunk_len, channels, height, width)
+
+        embeddings_spatial = encoder.encoder(frames_reshaped)
+        embeddings_temporal = embeddings_spatial.reshape(batch_size, chunk_len, self.feature_dim)
+        embeddings_temporal = encoder.time_encoder(embeddings_temporal)
+
+        features = encoder.transformer(embeddings_temporal)
+        return features.permute(0, 2, 1)
+
+    def forward(self, frames):
+        """
+        Extracts spatiotemporal sequences from video frames.
+        Handles input lengths > native_clip_len by processing in chunks.
+
+        Args:
+            frames (Tensor): Video frames (batch_size, channels, time, height, width)
+
+        Returns:
+            Tensor: Spatiotemporal features (batch_size, feature_dim, time)
+        """
+        total_len = frames.shape[2]
+        n = self.native_clip_len
+
+        if total_len <= n:
+            features = self._encode_chunk(frames)
+        else:
+            chunk_features = []
+            for start in range(0, total_len, n):
+                end = min(start + n, total_len)
+                chunk = frames[:, :, start:end, :, :]
+
+                if chunk.shape[2] < n:
+                    pad_len = n - chunk.shape[2]
+                    chunk = torch.nn.functional.pad(chunk, (0, 0, 0, 0, 0, pad_len), mode='replicate')
+                    encoded = self._encode_chunk(chunk)
+                    encoded = encoded[:, :, :end - start]
+                else:
+                    encoded = self._encode_chunk(chunk)
+
+                chunk_features.append(encoded)
+
+            features = torch.cat(chunk_features, dim=2)
+
+        return features
+
+    @classmethod
+    def from_config(cls, cfg):
+        clip_len = cfg.get('model', {}).get('max_clip_len', 16)
+        peft_cfg = cfg.get('model', {}).get('peft')
+        return cls(clip_len=clip_len, peft_cfg=peft_cfg)

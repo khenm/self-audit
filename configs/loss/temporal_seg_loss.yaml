@@ -1,0 +1,12 @@
+_target_: src.losses.temporal_segmentation_loss.TemporalWeakSegLoss
+dice_weight: 1.0
+volume_weight: 1.0
+phase_weight: 0.5
+gamma: 2.0
+focal_clip_threshold: 0.5
+focal_scale_weight: 1.0
+focal_ratio_weight: 10.0
+focal_sv_weight: 1.0
+curriculum_enabled: true
+curriculum_phase_epochs: 10
+curriculum_fade_epochs: 30

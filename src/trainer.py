@@ -9,7 +9,8 @@ import math
 import os
 import time
 from datetime import timedelta
-from typing import Any, Dict, List, Mapping, Optional
+from dataclasses import dataclass
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 
 import torch
 import torch.distributed as dist
@@ -34,9 +35,11 @@ from src.utils.general import (
     set_seeds,
 )
 from src.utils.logging import setup_logging
+from src.utils.checkpoint import robust_torch_save
 from src.utils.optimizer import construct_optimizers
 
 
+@dataclass(eq=False)
 class Trainer:
     """Orchestrates the full DDP/FSDP training lifecycle.
 
@@ -44,65 +47,58 @@ class Trainer:
     key (``data``, ``model``, ``optim``, ``loss``, …) arrives as a separate dict.
     """
 
-    EPSILON = 1e-8
+    EPSILON: ClassVar[float] = 1e-8
 
-    def __init__(
-        self,
-        *,
-        data: Dict[str, Any],
-        model: Dict[str, Any],
-        logging: Dict[str, Any],
-        checkpoint: Dict[str, Any],
-        max_epochs: int,
-        mode: str = "train",
-        device: str = "cuda",
-        seed_value: int = 42,
-        val_epoch_freq: int = 1,
-        distributed: Optional[Dict[str, Any]] = None,
-        cuda: Optional[Dict[str, Any]] = None,
-        limit_train_batches: Optional[int] = None,
-        limit_val_batches: Optional[int] = None,
-        optim: Optional[Dict[str, Any]] = None,
-        loss: Optional[Dict[str, Any]] = None,
-        env_variables: Optional[Dict[str, Any]] = None,
-        accum_steps: int = 1,
-        **kwargs,
-    ):
+    # Required fields
+    data: Dict[str, Any]
+    model: Dict[str, Any]
+    logging: Dict[str, Any]
+    checkpoint: Dict[str, Any]
+    max_epochs: int
+    # Optional fields with defaults
+    exp_name: str = ""
+    mode: str = "train"
+    device: str = "cuda"
+    seed_value: int = 42
+    val_epoch_freq: int = 1
+    distributed: Optional[Dict[str, Any]] = None
+    cuda: Optional[Dict[str, Any]] = None
+    limit_train_batches: Optional[int] = None
+    limit_val_batches: Optional[int] = None
+    optim: Optional[Dict[str, Any]] = None
+    loss: Optional[Dict[str, Any]] = None
+    env_variables: Optional[Dict[str, Any]] = None
+    accum_steps: int = 1
+
+    def __post_init__(self):
         # ---- 1. Env vars (before anything reads them) ----
         apply_pytorch_env_defaults()
-        setup_env_variables(env_variables)
+        setup_env_variables(self.env_variables)
         self._start_time = time.time()
         self._ckpt_time_elapsed = 0
 
-        # Store configs
-        self.data_conf = data
-        self.model_conf = model
-        self.loss_conf = loss
-        self.logging_conf = logging
-        self.checkpoint_conf = checkpoint
-        self.optim_conf = optim
-        self.distributed_conf = distributed or {}
+        # Config aliases (for internal use throughout the class)
+        self.data_conf = self.data
+        self.model_conf = self.model
+        self.loss_conf = self.loss
+        self.logging_conf = self.logging
+        self.checkpoint_conf = self.checkpoint
+        self.optim_conf = self.optim
+        self.distributed_conf = self.distributed or {}
 
-        # Hyperparameters
-        self.accum_steps = accum_steps
-        self.max_epochs = max_epochs
-        self.mode = mode
-        self.val_epoch_freq = val_epoch_freq
-        self.limit_train_batches = limit_train_batches
-        self.limit_val_batches = limit_val_batches
-        self.seed_value = seed_value
         self.where = 0.0  # training progress ∈ [0, 1]
 
         # ---- 2. Device setup ----
         self.local_rank, self.distributed_rank = get_machine_local_and_dist_rank()
-        if device == "cuda" and torch.cuda.is_available():
+        device_str = self.device
+        if device_str == "cuda" and torch.cuda.is_available():
             self.device = torch.device("cuda", self.local_rank)
             torch.cuda.set_device(self.local_rank)
         else:
             self.device = torch.device("cpu")
 
         # ---- 3. Distributed init ----
-        self._setup_backend(cuda)
+        self._setup_backend(self.cuda)
 
         # ---- 4. Logging ----
         self.rank = dist.get_rank() if is_dist_avail_and_initialized() else 0
@@ -115,7 +111,7 @@ class Trainer:
             log_level_secondary=self.logging_conf.get("log_level_secondary", "WARNING"),
             all_ranks=self.logging_conf.get("all_ranks", False),
         )
-        set_seeds(seed_value, max_epochs, self.distributed_rank)
+        set_seeds(self.seed_value, self.max_epochs, self.distributed_rank)
 
         # ---- 5. Components ----
         self._setup_components()
@@ -292,7 +288,6 @@ class Trainer:
         # Extract unwrapped model
         strategy = self.distributed_conf.get("strategy", "ddp")
         if strategy == "fsdp":
-            from src.utils.fsdp import fsdp_full_state_dict
             model_state = fsdp_full_state_dict(self.model)
         elif isinstance(self.model, nn.parallel.DistributedDataParallel):
             model_state = self.model.module.state_dict()
@@ -302,7 +297,6 @@ class Trainer:
         if self.distributed_rank == 0:
             content["model"] = model_state
             for name in names:
-                from src.utils.checkpoint import robust_torch_save
                 path = os.path.join(folder, f"{name}.pt")
                 logging.info(f"Saving checkpoint epoch={epoch} → {path}")
                 robust_torch_save(content, path)
@@ -547,6 +541,11 @@ class Trainer:
 
         Override this in subclasses for custom batch layouts.
         """
+        if "video" in batch:
+            out = {"x": batch["video"]}
+            if "lengths" in batch:
+                out["lengths"] = batch["lengths"]
+            return out
         if "image" in batch:
             return {"x": batch["image"]}
         if "images" in batch:
@@ -561,8 +560,17 @@ class Trainer:
         if self.loss_fn is None:
             raise ValueError("No loss function configured")
 
-        targets = batch.get("label", batch.get("labels", batch.get("target")))
-        loss = self.loss_fn(outputs, targets)
+        if getattr(self.loss_fn, "expects_batch", False) or hasattr(self.loss_fn, "dice_weight") or hasattr(self.loss_fn, "lam_curv"):
+            loss = self.loss_fn(outputs, batch)
+        else:
+            targets = batch.get("label", batch.get("labels", batch.get("target")))
+            loss = self.loss_fn(outputs, targets)
+            
+        if isinstance(loss, dict):
+            if "loss" not in loss:
+                raise ValueError("Loss dict must contain a 'loss' key")
+            return loss
+            
         return {"loss": loss}
 
     def _update_scalar_logs(self, loss_dict, batch, phase, step, loss_meters):

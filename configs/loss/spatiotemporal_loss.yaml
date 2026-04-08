@@ -1,0 +1,6 @@
+_target_: src.losses.spatiotemporal_loss.SpatiotemporalLoss
+dice_weight: 1.0
+flow_weight: 0.5
+curvature_weight: 1.0
+volume_weight: 0.5
+ef_weight: 1.0

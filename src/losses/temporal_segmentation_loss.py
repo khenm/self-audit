@@ -1,0 +1,265 @@
+import logging
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from monai.losses import DiceCELoss
+
+logger = logging.getLogger(__name__)
+
+class PolarFocalVolumeLoss(nn.Module):
+    """
+    A difficulty-aware orthogonal loss function.
+    Projects EDV/ESV into polar space (Magnitude/Angle) and applies independent
+    focal difficulty weighting to both the scale and the physiological ratio.
+    """
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        scale_weight: float = 1.0,
+        ratio_weight: float = 10.0,
+        sv_weight: float = 1.0,
+        clip_threshold: float = 0.5,
+        eps: float = 1e-7
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.scale_weight = scale_weight
+        self.ratio_weight = ratio_weight
+        self.sv_weight = sv_weight
+        self.clip_threshold = clip_threshold
+        self.eps = eps
+
+    def forward(
+        self,
+        pred_edv: torch.Tensor,
+        pred_esv: torch.Tensor,
+        target_edv: torch.Tensor,
+        target_esv: torch.Tensor
+    ) -> tuple[torch.Tensor, dict]:
+
+        # 1. Flatten inputs and filter for valid labeled frames
+        p_edv, p_esv = pred_edv.view(-1), pred_esv.view(-1)
+        t_edv, t_esv = target_edv.view(-1), target_esv.view(-1)
+
+        valid = (t_edv >= 0) & (t_esv >= 0)
+
+        if not valid.any():
+            dummy_loss = 0.0 * p_edv.sum()
+            return dummy_loss, {"scale_loss": dummy_loss.detach(), "ratio_loss": dummy_loss.detach(), "sv_loss": dummy_loss.detach()}
+
+        pred_vec = torch.stack([p_edv[valid], p_esv[valid]], dim=-1)
+        target_vec = torch.stack([t_edv[valid], t_esv[valid]], dim=-1)
+
+        pred_mag = torch.norm(pred_vec, p=2, dim=-1)
+        target_mag = torch.norm(target_vec, p=2, dim=-1)
+
+        base_loss_scale = F.huber_loss(pred_mag, target_mag, reduction='none', delta=self.clip_threshold)
+
+        error_scale = torch.abs(pred_mag - target_mag)
+        relative_error_scale = error_scale / (target_mag + self.eps)
+        p_scale = torch.clamp(relative_error_scale, min=0.0, max=1.0)
+        weight_scale = (1.0 + torch.pow(p_scale, self.gamma)).detach()
+
+        focal_loss_scale = (weight_scale * base_loss_scale).mean()
+
+        cos_sim = F.cosine_similarity(pred_vec, target_vec, dim=-1, eps=self.eps)
+        base_loss_ratio = 1.0 - cos_sim
+
+        p_ratio = torch.clamp(base_loss_ratio, min=0.0, max=1.0)
+        weight_ratio = (1.0 + torch.pow(p_ratio, self.gamma)).detach()
+
+        focal_loss_ratio = (weight_ratio * base_loss_ratio).mean()
+
+        pred_sv = p_edv[valid] - p_esv[valid]
+        target_sv = t_edv[valid] - t_esv[valid]
+
+        base_loss_sv = F.huber_loss(pred_sv, target_sv, reduction='none', delta=self.clip_threshold)
+
+        error_sv = torch.abs(pred_sv - target_sv)
+        relative_error_sv = error_sv / (torch.abs(target_sv) + self.eps)
+        p_sv = torch.clamp(relative_error_sv, min=0.0, max=1.0)
+        weight_sv = (1.0 + torch.pow(p_sv, self.gamma)).detach()
+
+        focal_loss_sv = (weight_sv * base_loss_sv).mean()
+
+        total_loss = (self.scale_weight * focal_loss_scale) + \
+                     (self.ratio_weight * focal_loss_ratio) + \
+                     (self.sv_weight * focal_loss_sv)
+
+        return total_loss, {
+            "scale_loss": focal_loss_scale.detach(),
+            "ratio_loss": focal_loss_ratio.detach(),
+            "sv_loss": focal_loss_sv.detach()
+        }
+
+
+class TemporalWeakSegLoss(nn.Module):
+    """
+    Computes spatial and volumetric regression losses for echocardiography video segments.
+    Focuses strictly on mask-guided spatial grounding and direct volume regression.
+
+    Instantiated via Hydra ``_target_: src.losses.temporal_segmentation_loss.TemporalWeakSegLoss``.
+    """
+    def __init__(
+        self,
+        dice_weight: float = 1.0,
+        volume_weight: float = 1.0,
+        phase_weight: float = 0.5,
+        gamma: float = 2.0,
+        focal_clip_threshold: float = 0.5,
+        focal_scale_weight: float = 1.0,
+        focal_ratio_weight: float = 10.0,
+        focal_sv_weight: float = 1.0,
+        curriculum_enabled: bool = False,
+        curriculum_phase_epochs: int = 10,
+        curriculum_fade_epochs: int = 30,
+    ):
+        super().__init__()
+        self.dice_weight = dice_weight
+        self.volume_weight = volume_weight
+        self.phase_weight = phase_weight
+
+        self.curriculum_enabled = curriculum_enabled
+        self.phase_only_epochs = curriculum_phase_epochs
+        self.fade_phase_epochs = curriculum_fade_epochs
+        self.max_focal_scale_weight = focal_scale_weight
+        self.max_focal_ratio_weight = focal_ratio_weight
+        self.max_focal_sv_weight = focal_sv_weight
+        self.max_phase_weight = phase_weight
+
+        self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
+
+        self.vol_loss_func = PolarFocalVolumeLoss(
+            gamma=gamma,
+            scale_weight=focal_scale_weight,
+            ratio_weight=focal_ratio_weight,
+            sv_weight=focal_sv_weight,
+            clip_threshold=focal_clip_threshold
+        )
+
+    def update_epoch(self, epoch: int):
+        if not self.curriculum_enabled:
+            return
+
+        if epoch <= self.phase_only_epochs:
+            self.vol_loss_func.scale_weight = 0.0
+            self.vol_loss_func.ratio_weight = 0.0
+            self.vol_loss_func.sv_weight = self.max_focal_sv_weight
+            self.phase_weight = self.max_phase_weight
+        elif epoch <= self.phase_only_epochs + self.fade_phase_epochs:
+            progress = (epoch - self.phase_only_epochs) / self.fade_phase_epochs
+            self.vol_loss_func.scale_weight = self.max_focal_scale_weight * progress
+            self.vol_loss_func.ratio_weight = self.max_focal_ratio_weight * progress
+            self.vol_loss_func.sv_weight = self.max_focal_sv_weight * (1.0 - progress)
+            self.phase_weight = self.max_phase_weight * (1.0 - progress)
+        else:
+            self.vol_loss_func.scale_weight = self.max_focal_scale_weight
+            self.vol_loss_func.ratio_weight = self.max_focal_ratio_weight
+            self.vol_loss_func.sv_weight = 0.0
+            self.phase_weight = 0.0
+
+        logger.info(f"[Epoch {epoch}] Curriculum schedule: scale={self.vol_loss_func.scale_weight:.2f}, ratio={self.vol_loss_func.ratio_weight:.2f}, sv={self.vol_loss_func.sv_weight:.2f}, phase={self.phase_weight:.2f}")
+
+    def forward(
+        self,
+        pred_logits: torch.Tensor,
+        target_masks: torch.Tensor,
+        frame_mask: torch.Tensor,
+        target_edv: torch.Tensor,
+        target_esv: torch.Tensor,
+        pred_edv: torch.Tensor,
+        pred_esv: torch.Tensor,
+        **kwargs
+    ):
+        loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
+
+        pred_phase_logits = kwargs.get("pred_phase_logits", None)
+
+        loss_phase = torch.tensor(0.0, device=pred_logits.device)
+
+        # Always use the state-gated volumes directly
+        loss_vol, vol_loss_dict = self.vol_loss_func(
+            pred_edv, pred_esv, target_edv, target_esv
+        )
+
+        if pred_phase_logits is not None:
+            loss_phase = self._compute_phase_loss(pred_phase_logits, frame_mask)
+
+        total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol) + (self.phase_weight * loss_phase)
+
+        loss_dict = {
+            "dice_loss": loss_dice,
+            "volume_loss": loss_vol,
+            "phase_loss": loss_phase,
+        }
+
+        if vol_loss_dict:
+            loss_dict.update(vol_loss_dict)
+
+        return total_loss, loss_dict
+
+    def _compute_dice_loss(
+        self,
+        pred_logits: torch.Tensor,
+        target_masks: torch.Tensor,
+        frame_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Vectorized Dice+CE on valid labeled frames."""
+        if pred_logits.shape[1] == 1 and pred_logits.shape[2] > 1:
+            pred_logits = pred_logits.permute(0, 2, 1, 3, 4)
+
+        if target_masks.shape[1] == 1 and target_masks.shape[2] > 1:
+            target_masks = target_masks.permute(0, 2, 1, 3, 4)
+
+        batch_size, seq_len, channels, height, width = pred_logits.shape
+
+        pred_flat = pred_logits.reshape(-1, channels, height, width)
+        target_flat = target_masks.reshape(-1, channels, height, width)
+        mask_flat = frame_mask.reshape(-1)
+
+        valid_indices = mask_flat > 0.5
+
+        if valid_indices.sum() == 0:
+            return 0.0 * pred_logits.sum()
+
+        return self.dice_func(
+            pred_flat[valid_indices],
+            target_flat[valid_indices]
+        )
+
+    def _compute_phase_loss(self, pred_phase_logits: torch.Tensor, frame_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Computes Cross-Entropy loss for predicted cyclic phase (0=Systole, 1=Diastole)
+        by inferring ground truth implicitly from ED/ES frames.
+        """
+        B, T, _ = pred_phase_logits.shape
+        loss_fn = nn.CrossEntropyLoss()
+        total_phase_loss = 0.0
+        valid_batches = 0
+
+        for b in range(B):
+            ed_idx = torch.where(frame_mask[b] == 2.0)[0]
+            es_idx = torch.where(frame_mask[b] == 1.0)[0]
+
+            if len(ed_idx) > 0 and len(es_idx) > 0:
+                ed = ed_idx[0].item()
+                es = es_idx[0].item()
+
+                target_phases = torch.zeros(T, dtype=torch.long, device=pred_phase_logits.device)
+
+                if ed < es:
+                    target_phases[:ed+1] = 1
+                    target_phases[ed+1:es+1] = 0
+                    target_phases[es+1:] = 1
+                else:
+                    target_phases[:es+1] = 0
+                    target_phases[es+1:ed+1] = 1
+                    target_phases[ed+1:] = 0
+
+                total_phase_loss += loss_fn(pred_phase_logits[b], target_phases)
+                valid_batches += 1
+
+        if valid_batches > 0:
+            return total_phase_loss / valid_batches
+        return torch.tensor(0.0, device=pred_phase_logits.device, requires_grad=True)

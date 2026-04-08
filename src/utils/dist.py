@@ -2,7 +2,6 @@ import os
 import torch
 import torch.distributed as dist
 
-
 def get_machine_local_and_dist_rank():
     """Read LOCAL_RANK and RANK from the environment (set by torchrun)."""
     local_rank = int(os.environ.get("LOCAL_RANK", 0))

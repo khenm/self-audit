@@ -1,0 +1,16 @@
+train:
+  _target_: src.datasets.pseudomask.PseudoMaskDataset
+  root_dir: /workspace/data/echonet-dynamic
+  mask_dir: /workspace/data/pseudomasks
+  split: train
+  img_size: [112, 112]
+
+val:
+  _target_: src.datasets.pseudomask.PseudoMaskDataset
+  root_dir: /workspace/data/echonet-dynamic
+  mask_dir: /workspace/data/pseudomasks
+  split: val
+  img_size: [112, 112]
+
+num_workers: 4
+batch_size: 8

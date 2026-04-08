@@ -1,14 +1,14 @@
 defaults:
-  - dataset@data: echonet
+  - dataset@data: pseudomask
   - model: cardiac_mamba
   - optim: adamw
-  - loss: temporal_seg_loss
+  - loss: pretrain_loss
   - _self_
 
-exp_name: cardiac_mamba_exp001
+exp_name: pretrain_pseudomask_001
 seed_value: 42
-max_epochs: 100
-accum_steps: 1
+max_epochs: 50
+accum_steps: 8
 val_epoch_freq: 5
 limit_train_batches: null
 limit_val_batches: null
@@ -26,14 +26,15 @@ logging:
     train:
       keys_to_log:
         - loss
-        - dice_loss
-        - volume_loss
-        - phase_loss
+        - loss_mask
+        - loss_curv
+        - loss_prior
     val:
       keys_to_log:
         - loss
-        - dice_loss
-        - volume_loss
+        - loss_mask
+        - loss_curv
+        - loss_prior
 
 checkpoint:
   save_dir: logs/${exp_name}/ckpts

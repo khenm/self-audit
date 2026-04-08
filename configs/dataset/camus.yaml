@@ -1,0 +1,22 @@
+train:
+  _target_: src.datasets.camus.CAMUSDataset
+  root_dir: datasets/camus
+  nifti_dir: datasets/camus/database_nifti
+  split_dir: datasets/camus/database_split
+  split: train
+  img_size: [256, 256]
+  num_classes: 4
+  stratify_bins: [0, 45, 100]
+
+val:
+  _target_: src.datasets.camus.CAMUSDataset
+  root_dir: datasets/camus
+  nifti_dir: datasets/camus/database_nifti
+  split_dir: datasets/camus/database_split
+  split: val
+  img_size: [256, 256]
+  num_classes: 4
+  stratify_bins: [0, 45, 100]
+
+num_workers: 12
+batch_size: 4
