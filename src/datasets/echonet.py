@@ -26,7 +26,6 @@ class EchoNetDataset(Dataset):
     Supports:
     - Sliding-window clip generation with optional ED/ES enforcement (pretrain mode)
     - Coordinate-scaled mask generation for arbitrary img_size
-    - Optional keypoint annotations (return_keypoints)
     - Optional pre-computed optical flow (flow_dir)
 
     Instantiated via Hydra ``_target_: src.datasets.echonet.EchoNetDataset``.
@@ -37,9 +36,9 @@ class EchoNetDataset(Dataset):
     img_size: tuple = (112, 112)
     sampling_rate: int = 1
     transform: Any = None
-    return_keypoints: bool = False
     pretrain: bool = False
     flow_dir: Optional[str] = None
+    video_level: bool = False
 
     def __post_init__(self):
         super().__init__()
@@ -63,7 +62,7 @@ class EchoNetDataset(Dataset):
         logger.info(
             f"EchoNetDataset initialized: Split={self.split}, Clips={len(self.clips)}, "
             f"Videos={len(self.file_list)}, FlowDir={self.flow_dir}, "
-            f"ReturnKeypoints={self.return_keypoints}"
+            f"VideoLevel={self.video_level}"
         )
 
     # ------------------------------------------------------------------
@@ -138,6 +137,14 @@ class EchoNetDataset(Dataset):
         landmark coverage (pretrain-fm-echo behaviour).
         """
         clips = []
+        
+        if getattr(self, "video_level", False):
+            for _, row in self.file_list.iterrows():
+                fname = row["FileName"]
+                total_frames = int(row["NumberOfFrames"])
+                clips.append((fname, 0, total_frames, total_frames))
+            return clips
+
         stride = max(1, self.max_clip_len - self.overlap)
 
         for _, row in self.file_list.iterrows():
@@ -182,6 +189,9 @@ class EchoNetDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _pad_video_tensor(self, video_chunk, start_idx, end_idx, valid_start, valid_end):
+        if getattr(self, "video_level", False):
+            return video_chunk
+            
         pad_left = max(0, valid_start - start_idx)
         pad_right = max(0, end_idx - valid_end)
 
@@ -245,25 +255,6 @@ class EchoNetDataset(Dataset):
         cv2.fillPoly(mask, [pts], 1)
         return mask
 
-    def _get_keypoints(self, t_subset, H, W):
-        """Extract and normalise 42 contour keypoints to [0, 1]."""
-        pts_df = t_subset.iloc[1:]
-        kps = np.stack([
-            np.concatenate([pts_df["X1"].values, pts_df["X2"].values[::-1]]),
-            np.concatenate([pts_df["Y1"].values, pts_df["Y2"].values[::-1]])
-        ], axis=1).astype(np.float32)
-
-        if len(kps) != 42:
-            if len(kps) > 42:
-                kps = kps[:42]
-            else:
-                pad = np.tile(kps[-1:], (42 - len(kps), 1))
-                kps = np.concatenate([kps, pad], axis=0)
-
-        kps[:, 0] /= W
-        kps[:, 1] /= H
-        return kps
-
     # ------------------------------------------------------------------
     # Dataset protocol
     # ------------------------------------------------------------------
@@ -292,7 +283,6 @@ class EchoNetDataset(Dataset):
 
         mask_clip = np.zeros((T_clip, H, W), dtype=np.uint8)
         frame_mask = np.zeros((T_clip,), dtype=np.float32)
-        keypoints_clip = np.zeros((T_clip, 42, 2), dtype=np.float32) if self.return_keypoints else None
 
         # ED / ES frame annotations
         if fname in self.meta_lookup:
@@ -319,8 +309,6 @@ class EchoNetDataset(Dataset):
                         t_subset = file_tracings[file_tracings["Frame"] == orig_idx]
                         if not t_subset.empty:
                             mask_clip[t] = self._generate_mask(t_subset, H, W)
-                            if self.return_keypoints:
-                                keypoints_clip[t] = self._get_keypoints(t_subset, H, W)
 
         # Convert to tensors
         video = video.transpose(3, 0, 1, 2).astype(np.float32) / 255.0  # (C, T, H, W)
@@ -351,9 +339,6 @@ class EchoNetDataset(Dataset):
         if flow_chunk is not None:
             output["flow"] = flow_chunk
 
-        if self.return_keypoints:
-            output["keypoints"] = torch.tensor(keypoints_clip, dtype=torch.float32)
-
         return output
 
     # ------------------------------------------------------------------
@@ -370,6 +355,9 @@ class EchoNetDataset(Dataset):
                 f_start = max(0, start_idx)
                 f_end = min(total_frames - 1, end_idx)
                 valid_flow = full_flow[f_start:f_end]
+
+                if getattr(self, "video_level", False):
+                    return valid_flow
 
                 target_len = self.max_clip_len - 1
                 curr_len = valid_flow.shape[0]
@@ -402,7 +390,6 @@ def build_dataloaders(cfg):
         cfg['data'].get('flow_dir', None)
         cfg['data'].get('subset_size', None)
         cfg['model'].get('max_clip_len', 32)
-        cfg['model'].get('return_keypoints', False)
         cfg['training'].get('batch_size', 8)
         cfg['training'].get('num_workers', 4)
         cfg['training'].get('pretrain', False)
@@ -413,18 +400,17 @@ def build_dataloaders(cfg):
     max_clip_len = cfg['model'].get('max_clip_len', 32)
     img_size = tuple(cfg['data'].get('img_size', [112, 112]))
     flow_dir = cfg['data'].get('flow_dir', None)
-    return_kps = cfg['model'].get('return_keypoints', False)
     pretrain = cfg['training'].get('pretrain', False)
 
     if pretrain:
         logger.info("Pretraining mode: only clips containing both ED and ES frames are used.")
 
     ds_tr = EchoNetDataset(root_dir, "TRAIN", max_clip_len=max_clip_len, img_size=img_size,
-                           return_keypoints=return_kps, pretrain=pretrain, flow_dir=flow_dir)
+                           pretrain=pretrain, flow_dir=flow_dir)
     ds_va = EchoNetDataset(root_dir, "VAL",   max_clip_len=max_clip_len, img_size=img_size,
-                           return_keypoints=return_kps, pretrain=pretrain, flow_dir=flow_dir)
+                           pretrain=pretrain, flow_dir=flow_dir)
     ds_ts = EchoNetDataset(root_dir, "TEST",  max_clip_len=max_clip_len, img_size=img_size,
-                           return_keypoints=return_kps, pretrain=pretrain, flow_dir=flow_dir)
+                           pretrain=pretrain, flow_dir=flow_dir)
 
     subset_size = cfg['data'].get('subset_size')
     if subset_size:

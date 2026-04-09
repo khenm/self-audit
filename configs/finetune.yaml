@@ -1,0 +1,69 @@
+defaults:
+  - dataset@data: echonet
+  - model: cardiac_mamba
+  - optim: adamw
+  - loss: finetune_loss
+  - _self_
+
+exp_name: finetune_echonet_001
+seed_value: 42
+max_epochs: 100
+accum_steps: 1
+val_epoch_freq: 5
+limit_train_batches: null
+limit_val_batches: null
+
+logging:
+  log_dir: /workspace/logs/${exp_name}
+  log_freq: 10
+  log_level_primary: INFO
+  log_level_secondary: WARNING
+  all_ranks: false
+  tensorboard_writer:
+    _target_: src.utils.tensorboard_writer.TensorBoardLogger
+    path: ${logging.log_dir}/tensorboard
+  scalar_keys_to_log:
+    train:
+      keys_to_log:
+        - loss
+        - loss_mask
+        - loss_vol
+        - loss_ef
+        - loss_phase
+        - loss_curv
+        - loss_phase_smooth
+        - loss_prior
+        - loss_l1
+    val:
+      keys_to_log:
+        - loss
+        - loss_mask
+        - loss_vol
+        - loss_ef
+        - loss_phase
+        - loss_curv
+        - loss_phase_smooth
+
+checkpoint:
+  save_dir: /workspace/logs/${exp_name}/ckpts
+  save_freq: 5
+  resume_checkpoint_path: null
+  strict: false
+
+distributed:
+  strategy: ddp
+  backend: nccl
+  find_unused_parameters: false
+  gradient_as_bucket_view: true
+  bucket_cap_mb: 25
+  broadcast_buffers: true
+  timeout_mins: 30
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    cpu_offload: false
+    min_num_params: 100000
+
+cuda:
+  cudnn_deterministic: false
+  cudnn_benchmark: false
+  allow_tf32: true

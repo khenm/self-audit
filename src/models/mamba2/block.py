@@ -102,6 +102,12 @@ class Mamba2(nn.Module):
 
         # 3. Conv1d and Activation (Only on x, B, C)
         xBC = xBC.transpose(1, 2)
+        
+        # cuDNN workaround: grouped conv1d crashes when seqlen < kernel_size in AMP
+        pad_len = max(0, self.d_conv - seqlen)
+        if pad_len > 0:
+            xBC = F.pad(xBC, (0, pad_len))
+            
         xBC = self.conv1d(xBC)[:, :, :seqlen]
         xBC = xBC.transpose(1, 2)
         xBC = F.silu(xBC)

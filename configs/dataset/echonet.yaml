@@ -1,20 +1,20 @@
 train:
   _target_: src.datasets.echonet.EchoNetDataset
-  root_dir: datasets/echonet-dynamic
+  root_dir: /workspace/data/EchoNet-Dynamic
   split: train
   img_size: [112, 112]
-  num_classes: 1
-  return_keypoints: true
-  stratify_bins: [0, 45, 100]
 
 val:
   _target_: src.datasets.echonet.EchoNetDataset
-  root_dir: datasets/echonet-dynamic
+  root_dir: /workspace/data/EchoNet-Dynamic
   split: val
   img_size: [112, 112]
-  num_classes: 1
-  return_keypoints: true
-  stratify_bins: [0, 45, 100]
+
+test:
+  _target_: src.datasets.echonet.EchoNetDataset
+  root_dir: /workspace/data/EchoNet-Dynamic
+  split: test
+  img_size: [112, 112]
 
 num_workers: 12
 batch_size: 4

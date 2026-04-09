@@ -6,6 +6,8 @@ from .flow import FlowConsistencyLoss
 from .smooth import TemporalSmoothnessLoss
 from .volume_seg import JointVolumeSegLoss
 from .pretrain_loss import PretrainLoss
+from .finetune_loss import FinetuneLoss
+from .calibration_loss import CalibrationLoss
 
 __all__ = [
     "TemporalWeakSegLoss",
@@ -17,4 +19,6 @@ __all__ = [
     "TemporalSmoothnessLoss",
     "JointVolumeSegLoss",
     "PretrainLoss",
+    "FinetuneLoss",
+    "CalibrationLoss",
 ]

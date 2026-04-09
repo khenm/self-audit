@@ -164,7 +164,17 @@ class CardiacMamba(nn.Module):
         B, C, T, H, W = x.shape
         x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
 
-        mask_logits_flat, tokens_flat, _ = self.forward_spatial(x_flat)
+        # Chunk the spatial forward pass to avoid OOM on long sequences
+        spatial_chunk_size = 32
+        mask_logits_flat_list = []
+        tokens_flat_list = []
+        for i in range(0, x_flat.shape[0], spatial_chunk_size):
+            ml_chunk, tok_chunk, _ = self.forward_spatial(x_flat[i:i+spatial_chunk_size])
+            mask_logits_flat_list.append(ml_chunk)
+            tokens_flat_list.append(tok_chunk)
+
+        mask_logits_flat = torch.cat(mask_logits_flat_list, dim=0)
+        tokens_flat = torch.cat(tokens_flat_list, dim=0)
 
         mask_logits = mask_logits_flat.view(B, T, 1, *mask_logits_flat.shape[2:])
         tokens = tokens_flat.view(B, T, -1)
