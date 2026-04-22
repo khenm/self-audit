@@ -1,31 +1,28 @@
 defaults:
   - dataset@data: echonet
   - model: cardiac_mamba
-  - loss: calibration_loss
+  - loss: finetune_loss
   - _self_
 
-exp_name: calibrate_volume_002
+exp_name: train_temporal_001
 seed_value: 42
-max_epochs: 20
-accum_steps: 1
-val_epoch_freq: 1
+max_epochs: 50
+accum_steps: 4
+val_epoch_freq: 2
 limit_train_batches: null
 limit_val_batches: null
-num_workers: 4
-batch_size: 64
+num_workers: 12
+batch_size: 16
 
 optim:
   optimizer:
     _target_: torch.optim.AdamW
-    lr: 5e-3
-    weight_decay: 0.0
+    lr: 1e-4
+    weight_decay: 1e-4
 
   frozen_module_names:
     - encoder
     - decoder
-    - temporal_adapter
-    - temporal_mamba
-    - phase_head
 
   amp:
     enabled: true
@@ -39,12 +36,12 @@ optim:
     lr:
       - scheduler:
           _target_: fvcore.common.param_scheduler.CosineParamScheduler
-          start_value: 5e-3
-          end_value: 5e-5
+          start_value: 1e-4
+          end_value: 1e-6
     weight_decay:
       - scheduler:
           _target_: fvcore.common.param_scheduler.ConstantParamScheduler
-          value: 0.0
+          value: 1e-4
 
 logging:
   log_dir: /workspace/logs/${exp_name}
@@ -59,18 +56,26 @@ logging:
     train:
       keys_to_log:
         - loss
+        - loss_mask
         - loss_vol
         - loss_ef
+        - loss_phase
+        - loss_curv
+        - loss_phase_smooth
     val:
       keys_to_log:
         - loss
+        - loss_mask
         - loss_vol
         - loss_ef
+        - loss_phase
+        - loss_curv
+        - loss_phase_smooth
 
 checkpoint:
   save_dir: /workspace/logs/${exp_name}/ckpts
-  save_freq: 2
-  # Point this at the Phase 1 pretrain checkpoint before running
+  save_freq: 5
+  # Resume from Phase 1b calibration checkpoint
   resume_checkpoint_path: null
   strict: false
 

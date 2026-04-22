@@ -15,6 +15,3 @@ test:
   root_dir: /workspace/data/EchoNet-Dynamic
   split: test
   img_size: [112, 112]
-
-num_workers: 12
-batch_size: 4

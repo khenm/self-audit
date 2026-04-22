@@ -3,4 +3,4 @@ bce_weight: 0.5
 dice_weight: 0.5
 lam_curv: 0.01
 lam_prior: 0.001
-log_c_init: -6.907755
+log_c_init: 1.0202

@@ -8,4 +8,4 @@ lam_curv: 0.005
 lam_phase_smooth: 0.01
 lam_l1: 0.00001
 lam_prior: 0.0005
-log_c_init: -6.907755
+log_c_init: 1.0202

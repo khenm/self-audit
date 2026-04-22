@@ -4,6 +4,8 @@ import random
 import os
 from typing import List, Tuple
 
+import torch.nn.functional as F
+
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
@@ -183,6 +185,7 @@ def main():
     parser.add_argument("--samples", type=int, default=16, help="Number of frames to sample and display per video")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_path", type=str, default="volume_plot.png")
+    parser.add_argument("--inspect", action="store_true", help="Print per-video areas, c, and gamma instead of plotting")
     args, overrides = parser.parse_known_args()
     
     random.seed(args.seed)
@@ -287,6 +290,27 @@ def main():
             target_esv = batch.get("target_esv")[0].item() * 300.0 if "target_esv" in batch else -1.0
             
             case_name = batch.get("case", [f"Unknown"])[0]
+
+            if args.inspect:
+                log_c = outputs.get("log_c")
+                gamma_raw = outputs.get("gamma_raw")
+                bias_param = outputs.get("bias")
+                c_val = torch.exp(log_c).item() if log_c is not None else float("nan")
+                gamma_val = F.softplus(gamma_raw).item() if gamma_raw is not None else float("nan")
+                bias_val = bias_param.item() if bias_param is not None else float("nan")
+
+                mask_logits_full = outputs["mask_logits"][0, 0]  # (T, H, W)
+                mask_probs_full = torch.sigmoid(mask_logits_full)
+                H_m, W_m = mask_probs_full.shape[-2], mask_probs_full.shape[-1]
+                areas_per_frame = mask_probs_full.reshape(T_total, -1).sum(dim=-1) / (H_m * W_m)  # (T,)
+
+                print(f"\n=== {case_name} ===")
+                print(f"  c      = {c_val:.6f}")
+                print(f"  gamma  = {gamma_val:.6f}")
+                print(f"  bias   = {bias_val:.6f}")
+                print(f"  Areas (normalized, per frame):")
+                for t_idx, a in enumerate(areas_per_frame.cpu().tolist()):
+                    print(f"    frame {t_idx:3d}: {a:.6f}")
 
             results.append({
                 "video": video[0], 

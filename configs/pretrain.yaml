@@ -12,6 +12,8 @@ accum_steps: 8
 val_epoch_freq: 5
 limit_train_batches: null
 limit_val_batches: null
+num_workers: 4
+batch_size: 8
 
 logging:
   log_dir: logs/${exp_name}

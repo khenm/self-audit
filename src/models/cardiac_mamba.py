@@ -40,33 +40,26 @@ class PhaseHead(nn.Module):
         return self.net(h_t)
 
 class VolumeDerivation(nn.Module):
-    """
-    Volume Derivation Module.
-    Predicts volume from soft area using a pointwise parameterized function.
-    V = c * A^gamma
-    """
-    def __init__(self, init_log_c: float = -6.907755, init_gamma_raw: float = 1.5):
+    def __init__(self, init_log_c: float = 0.7, init_gamma_raw: float = 1.0, init_bias: float = 0.0):
         super().__init__()
-        # math.log(0.001) ~ -6.907755
         self.log_c = nn.Parameter(torch.tensor(float(init_log_c)))
-        # math.log(math.exp(1.5) - 1.0) ~ 1.2475
-        gamma_raw_init = math.log(math.exp(init_gamma_raw) - 1.0) if init_gamma_raw > 0 else 1.5
+        gamma_raw_init = math.log(math.exp(init_gamma_raw) - 1.0)
         self.gamma_raw = nn.Parameter(torch.tensor(float(gamma_raw_init)))
+        self.bias = nn.Parameter(torch.tensor(float(init_bias)))
 
     def forward(self, mask_logits):
-        """
-        mask_logits: (B, T, 1, H, W) or (B, 1, H, W)
-        """
         mask_probs = torch.sigmoid(mask_logits)
         if mask_probs.ndim == 5:
-            a_t = mask_probs.view(mask_probs.shape[0], mask_probs.shape[1], -1).sum(dim=-1, keepdim=True)
+            B, T = mask_probs.shape[0], mask_probs.shape[1]
+            spatial = mask_probs.shape[-2] * mask_probs.shape[-1]  # H * W
+            a_t = mask_probs.view(B, T, -1).sum(dim=-1, keepdim=True) / spatial
         else:
-            a_t = mask_probs.view(mask_probs.shape[0], -1).sum(dim=-1, keepdim=True)
-        
+            spatial = mask_probs.shape[-2] * mask_probs.shape[-1]
+            a_t = mask_probs.view(mask_probs.shape[0], -1).sum(dim=-1, keepdim=True) / spatial
+
         c = torch.exp(self.log_c)
         gamma = F.softplus(self.gamma_raw)
-        
-        v_t = c * (a_t ** gamma)
+        v_t = c * (a_t.clamp(min=1e-6) ** gamma) + self.bias
         return v_t
 
 
@@ -139,7 +132,7 @@ class CardiacMamba(nn.Module):
         mask_probs = torch.sigmoid(mask_logits)
 
         B_T = mask_probs.shape[0]
-        z_t = mask_probs.view(B_T, -1).sum(dim=1, keepdim=True) / 1000.0
+        z_t = mask_probs.view(B_T, -1).sum(dim=1, keepdim=True) / 1000
 
         mask_downsampled = F.adaptive_avg_pool2d(mask_probs, bottleneck.shape[2:])
 
@@ -207,7 +200,8 @@ class CardiacMamba(nn.Module):
             "pred_ef": (pred_edv - pred_esv) / torch.clamp(pred_edv, min=1e-3),
             "hidden_features": temporal_out,
             "log_c": self.volume_derivation.log_c,
-            "gamma_raw": self.volume_derivation.gamma_raw
+            "gamma_raw": self.volume_derivation.gamma_raw,
+            "bias": self.volume_derivation.bias
         }
 
     def step(self, x: torch.Tensor, state=None):
@@ -239,5 +233,6 @@ class CardiacMamba(nn.Module):
             "pred_phase_logits": phase_logits,
             "hidden_features": temporal_out_flat,
             "log_c": self.volume_derivation.log_c,
-            "gamma_raw": self.volume_derivation.gamma_raw
+            "gamma_raw": self.volume_derivation.gamma_raw,
+            "bias": self.volume_derivation.bias
         }, next_state

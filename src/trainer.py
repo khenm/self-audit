@@ -65,6 +65,8 @@ class Trainer:
     cuda: Optional[Dict[str, Any]] = None
     limit_train_batches: Optional[int] = None
     limit_val_batches: Optional[int] = None
+    num_workers: int = 4
+    batch_size: int = 32
     optim: Optional[Dict[str, Any]] = None
     loss: Optional[Dict[str, Any]] = None
     env_variables: Optional[Dict[str, Any]] = None
@@ -158,7 +160,11 @@ class Trainer:
 
         backend = self.distributed_conf.get("backend", "nccl")
         timeout = self.distributed_conf.get("timeout_mins", 30)
-        if torch.cuda.is_available() and not is_dist_avail_and_initialized():
+        if (
+            torch.cuda.is_available()
+            and not is_dist_avail_and_initialized()
+            and "RANK" in os.environ
+        ):
             dist.init_process_group(backend=backend, timeout=timedelta(minutes=timeout))
 
     def _setup_components(self):
@@ -192,8 +198,8 @@ class Trainer:
         self.train_dataset = None
         self.val_dataset = None
 
-        num_workers = self.data_conf.get("num_workers", 4)
-        batch_size = self.data_conf.get("batch_size", 32)
+        num_workers = self.num_workers
+        batch_size = self.batch_size
 
         if self.mode in ("train", "val") and "val" in self.data_conf:
             val_ds = instantiate(self.data_conf["val"], _recursive_=False)
@@ -252,7 +258,10 @@ class Trainer:
 
         if "optimizer" in ckpt and self.mode != "val":
             for optim in self.optims:
-                optim.optimizer.load_state_dict(ckpt["optimizer"])
+                try:
+                    optim.optimizer.load_state_dict(ckpt["optimizer"])
+                except ValueError:
+                    logging.warning("Optimizer state dict mismatch (param count changed) — starting optimizer from scratch")
 
         self.epoch = ckpt.get("prev_epoch", ckpt.get("epoch", 0))
         self.steps = ckpt.get("steps", {"train": 0, "val": 0})
@@ -328,11 +337,15 @@ class Trainer:
 
     def run(self):
         assert self.mode in ("train", "val")
-        if self.mode == "train":
-            self.run_train()
-            self.run_val()
-        else:
-            self.run_val()
+        try:
+            if self.mode == "train":
+                self.run_train()
+                self.run_val()
+            else:
+                self.run_val()
+        finally:
+            if is_dist_avail_and_initialized():
+                dist.destroy_process_group()
 
     def run_train(self):
         while self.epoch < self.max_epochs:

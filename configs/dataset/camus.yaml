@@ -17,6 +17,3 @@ val:
   img_size: [256, 256]
   num_classes: 4
   stratify_bins: [0, 45, 100]
-
-num_workers: 12
-batch_size: 4

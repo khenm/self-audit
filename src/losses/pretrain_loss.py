@@ -14,7 +14,7 @@ class PretrainLoss(nn.Module):
         dice_weight: float = 0.5,
         lam_curv: float = 0.01,
         lam_prior: float = 0.001,
-        log_c_init: float = -6.907755,
+        log_c_init: float = 1.0202,
         **kwargs
     ):
         super().__init__()
@@ -67,12 +67,13 @@ class PretrainLoss(nn.Module):
             if valid_curv_mask.any():
                 loss_curv = (d2_vol[valid_curv_mask] ** 2).mean()
 
-        # 3. L_prior: L2 on (γ - 1.5)² + (log_c - log_c_init)²
+        # 3. L_prior: L2 on (γ - 1.5)² + (log_c - log_c_init)² + bias²
         gamma_raw = outputs['gamma_raw']
         gamma = F.softplus(gamma_raw)
         log_c = outputs['log_c']
-        
-        loss_prior = (gamma - 1.5)**2 + (log_c - self.log_c_init)**2
+        bias = outputs['bias']
+
+        loss_prior = (gamma - 1.5)**2 + (log_c - self.log_c_init)**2 + bias**2
 
         loss = loss_mask + self.lam_curv * loss_curv + self.lam_prior * loss_prior
         

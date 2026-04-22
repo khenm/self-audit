@@ -175,8 +175,8 @@ class EchoNetDataset(Dataset):
 
                 # In pretrain mode, enforce that both landmarks lie within the clip
                 if self.pretrain:
-                    has_ed = start < ed_frame < end - 1
-                    has_es = start < es_frame < end - 1
+                    has_ed = start <= ed_frame <= end - 1
+                    has_es = start <= es_frame <= end - 1
                     if not (has_ed and has_es):
                         continue
 

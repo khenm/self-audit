@@ -1,1 +1,2 @@
 _target_: src.losses.calibration_loss.CalibrationLoss
+lam_ef: 1.0

@@ -19,7 +19,7 @@ class FinetuneLoss(nn.Module):
         lam_phase_smooth: float = 0.01,
         lam_l1: float = 1e-5,
         lam_prior: float = 0.0005,
-        log_c_init: float = -6.907755,
+        log_c_init: float = 1.0202,
         **kwargs
     ):
         super().__init__()
@@ -139,13 +139,15 @@ class FinetuneLoss(nn.Module):
             if valid_ef_mask.any():
                 loss_ef = F.l1_loss(pred_ef_soft[valid_ef_mask], target_ef[valid_ef_mask])
 
-        # L_curv
+        # L_curv — jerk penalty (d³V/dt³): penalises abrupt changes in curvature
+        # while allowing the curve to be freely concave or convex.
         loss_curv = torch.tensor(0.0, device=device)
-        if T >= 3:
-            d2_vol = vol_curve[:, :-2] - 2 * vol_curve[:, 1:-1] + vol_curve[:, 2:]
-            valid_curv_mask = valid_length_mask[:, 2:]
-            if valid_curv_mask.any():
-                loss_curv = (d2_vol[valid_curv_mask] ** 2).mean()
+        if T >= 4:
+            d3_vol = (vol_curve[:, 3:] - 3 * vol_curve[:, 2:-1]
+                      + 3 * vol_curve[:, 1:-2] - vol_curve[:, :-3])
+            valid_jerk_mask = valid_length_mask[:, 3:]
+            if valid_jerk_mask.any():
+                loss_curv = (d3_vol[valid_jerk_mask] ** 2).mean()
 
         # L_phase_smooth
         loss_phase_smooth = torch.tensor(0.0, device=device)
@@ -161,9 +163,12 @@ class FinetuneLoss(nn.Module):
         loss_prior = torch.tensor(0.0, device=device)
         gamma_raw = outputs.get('gamma_raw')
         log_c = outputs.get('log_c')
+        bias = outputs.get('bias')
         if gamma_raw is not None and log_c is not None:
             gamma = F.softplus(gamma_raw)
             loss_prior = (gamma - 1.5)**2 + (log_c - self.log_c_init)**2
+            if bias is not None:
+                loss_prior = loss_prior + bias**2
 
         # L_L1
         loss_l1 = torch.tensor(0.0, device=device)
@@ -207,5 +212,5 @@ class FinetuneLoss(nn.Module):
             lam_phase_smooth=loss_cfg.get("lam_phase_smooth", 0.01),
             lam_l1=loss_cfg.get("lam_l1", 1e-5),
             lam_prior=loss_cfg.get("lam_prior", 0.0005),
-            log_c_init=loss_cfg.get("log_c_init", -6.907755),
+            log_c_init=loss_cfg.get("log_c_init", 1.0202),
         )

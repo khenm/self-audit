@@ -49,15 +49,24 @@ class CardiacMetrics:
         """
         Accumulate one batch.
 
+        Volume/EF evaluation strategy (preferred when available):
+          pred_vol_curve (B, T) or (B, T, 1) + frame_mask → hard ED/ES frame lookup.
+          This matches exactly what CalibrationLoss optimises and avoids the
+          soft phase-attention weighting (pred_edv/pred_esv) which is unreliable
+          when the phase head is frozen or not yet converged.
+
+          Fallback (when pred_vol_curve absent): uses soft pred_edv / pred_esv / pred_ef.
+
         outputs keys used:
-          pred_edv  (B,)  — soft phase-weighted EDV prediction
-          pred_esv  (B,)  — soft phase-weighted ESV prediction
-          pred_ef   (B,)  — derived EF = (EDV - ESV) / EDV
+          pred_vol_curve (B, T[, 1]) — per-frame volume from V=c·A^γ  [preferred]
+          pred_edv  (B,)  — soft phase-weighted EDV                   [fallback]
+          pred_esv  (B,)  — soft phase-weighted ESV                   [fallback]
+          pred_ef   (B,)  — soft EF = (EDV - ESV) / EDV              [fallback]
           mask_logits (B, 1, T, H, W)
 
         batch keys used:
-          target_edv  (B,)  — GT EDV in mL; <0 means invalid
-          target_esv  (B,)  — GT ESV in mL; <0 means invalid
+          target_edv  (B,)  — GT EDV normalised (÷300 mL); <0 means invalid
+          target_esv  (B,)  — GT ESV normalised (÷300 mL); <0 means invalid
           target_ef   (B,)  — GT EF as fraction; <0 means invalid
           label       (B, 1, T, H, W)  — binary GT masks
           frame_mask  (B, T)  — 2=ED, 1=ES, 0=none
@@ -67,22 +76,58 @@ class CardiacMetrics:
         frame_mask = batch.get("frame_mask")      # (B, T)
 
         # --- volume / EF ---
-        for key, pred_key, gt_key in [
-            ("edv", "pred_edv", "target_edv"),
-            ("esv", "pred_esv", "target_esv"),
-            ("ef",  "pred_ef",  "target_ef"),
-        ]:
-            pred_t = outputs.get(pred_key)
-            gt_t = batch.get(gt_key)
-            if pred_t is None or gt_t is None:
-                continue
-            valid = gt_t >= 0
-            if not valid.any():
-                continue
-            p = pred_t[valid].detach().cpu().float()
-            g = gt_t[valid].detach().cpu().float()
-            getattr(self, f"_pred_{key}").extend(p.tolist())
-            getattr(self, f"_gt_{key}").extend(g.tolist())
+        vol_curve = outputs.get("pred_vol_curve")  # (B, T) or (B, T, 1)
+
+        if vol_curve is not None and frame_mask is not None:
+            # Hard-frame evaluation: read volume directly at the labelled ED/ES frame.
+            # EDV/ESV are in the same normalised space as the calibration loss (÷300 mL).
+            vols = vol_curve.squeeze(-1).detach().cpu().float()  # (B, T)
+            fm = frame_mask.cpu()
+            target_edv = batch.get("target_edv")
+            target_esv = batch.get("target_esv")
+            target_ef = batch.get("target_ef")
+
+            for b in range(vols.shape[0]):
+                ed_idx = torch.where(fm[b] == 2.0)[0]
+                es_idx = torch.where(fm[b] == 1.0)[0]
+
+                has_ed = len(ed_idx) > 0 and target_edv is not None and target_edv[b] >= 0
+                has_es = len(es_idx) > 0 and target_esv is not None and target_esv[b] >= 0
+
+                if has_ed:
+                    self._pred_edv.append(vols[b, ed_idx[0]].item() * 300.0)
+                    self._gt_edv.append(target_edv[b].item() * 300.0)
+
+                if has_es:
+                    self._pred_esv.append(vols[b, es_idx[0]].item() * 300.0)
+                    self._gt_esv.append(target_esv[b].item() * 300.0)
+
+                if has_ed and has_es and target_ef is not None and target_ef[b] >= 0:
+                    p_edv = vols[b, ed_idx[0]].item()
+                    p_esv = vols[b, es_idx[0]].item()
+                    self._pred_ef.append((p_edv - p_esv) / max(p_edv, 1e-3))
+                    self._gt_ef.append(target_ef[b].item())
+        else:
+            # Fallback: soft phase-weighted predictions (used when vol_curve unavailable).
+            # EDV/ESV are stored normalised (÷300 mL) by EchoNetDataset.
+            _vol_scale = {"edv": 300.0, "esv": 300.0, "ef": 1.0}
+            for key, pred_key, gt_key in [
+                ("edv", "pred_edv", "target_edv"),
+                ("esv", "pred_esv", "target_esv"),
+                ("ef",  "pred_ef",  "target_ef"),
+            ]:
+                pred_t = outputs.get(pred_key)
+                gt_t = batch.get(gt_key)
+                if pred_t is None or gt_t is None:
+                    continue
+                valid = gt_t >= 0
+                if not valid.any():
+                    continue
+                scale = _vol_scale[key]
+                p = pred_t[valid].detach().cpu().float() * scale
+                g = gt_t[valid].detach().cpu().float() * scale
+                getattr(self, f"_pred_{key}").extend(p.tolist())
+                getattr(self, f"_gt_{key}").extend(g.tolist())
 
         # --- Dice at ED/ES frames ---
         if mask_logits is None or label is None or frame_mask is None:
