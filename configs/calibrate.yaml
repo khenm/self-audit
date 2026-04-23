@@ -4,7 +4,7 @@ defaults:
   - loss: calibration_loss
   - _self_
 
-exp_name: calibrate_volume_002
+exp_name: calibrate_volume_003
 seed_value: 42
 max_epochs: 20
 accum_steps: 1
@@ -17,7 +17,7 @@ batch_size: 64
 optim:
   optimizer:
     _target_: torch.optim.AdamW
-    lr: 5e-3
+    lr: 3e-4
     weight_decay: 0.0
 
   frozen_module_names:
@@ -26,6 +26,9 @@ optim:
     - temporal_adapter
     - temporal_mamba
     - phase_head
+
+  reinit_module_names:
+    - volume_derivation
 
   amp:
     enabled: true
@@ -39,8 +42,8 @@ optim:
     lr:
       - scheduler:
           _target_: fvcore.common.param_scheduler.CosineParamScheduler
-          start_value: 5e-3
-          end_value: 5e-5
+          start_value: 3e-4
+          end_value: 3e-6
     weight_decay:
       - scheduler:
           _target_: fvcore.common.param_scheduler.ConstantParamScheduler

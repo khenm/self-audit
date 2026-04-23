@@ -47,6 +47,11 @@ class VolumeDerivation(nn.Module):
         self.gamma_raw = nn.Parameter(torch.tensor(float(gamma_raw_init)))
         self.bias = nn.Parameter(torch.tensor(float(init_bias)))
 
+    def reset_parameters(self, init_log_c: float = 0.7, init_gamma_raw: float = 1.0, init_bias: float = 0.0):
+        self.log_c.data.fill_(init_log_c)
+        self.gamma_raw.data.fill_(math.log(math.exp(init_gamma_raw) - 1.0))
+        self.bias.data.fill_(init_bias)
+
     def forward(self, mask_logits):
         mask_probs = torch.sigmoid(mask_logits)
         if mask_probs.ndim == 5:

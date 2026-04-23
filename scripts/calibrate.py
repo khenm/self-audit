@@ -16,6 +16,9 @@ import argparse
 from hydra import compose, initialize
 
 from src.trainers.finetune_trainer import FinetuneTrainer
+import logging
+import torch.nn as nn
+import torch
 
 
 def main():
@@ -27,6 +30,15 @@ def main():
         cfg = compose(config_name=args.config, overrides=overrides)
 
     trainer = FinetuneTrainer(**cfg)
+
+    model = trainer.model.module if hasattr(trainer.model, "module") else trainer.model
+    if hasattr(model, "volume_derivation"):
+        logging.info("Randomly reinitializing the volume head weights for calibration stage.")
+        with torch.no_grad():
+            nn.init.normal_(model.volume_derivation.log_c)
+            nn.init.normal_(model.volume_derivation.gamma_raw)
+            nn.init.normal_(model.volume_derivation.bias)
+
     trainer.run()
 
 

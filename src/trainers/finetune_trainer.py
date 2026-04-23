@@ -29,6 +29,19 @@ from src.utils.general import (
 class FinetuneTrainer(Trainer):
     """Drop-in replacement for Trainer that adds cardiac metrics at validation."""
 
+    def _load_checkpoint(self, path: str):
+        super()._load_checkpoint(path)
+        reinit_names = (self.optim_conf or {}).get("reinit_module_names", [])
+        if not reinit_names:
+            return
+        for name, mod in self.model.named_modules():
+            if name in reinit_names:
+                if hasattr(mod, "reset_parameters"):
+                    mod.reset_parameters()
+                    logging.info(f"Reinitialized module after checkpoint load: {name}")
+                else:
+                    logging.warning(f"Module '{name}' has no reset_parameters() — skipping reinit")
+
     @torch.no_grad()
     def val_epoch(self, loader):
         batch_time = AverageMeter("Batch", self.device, ":.4f")

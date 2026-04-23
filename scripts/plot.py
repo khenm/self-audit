@@ -304,13 +304,21 @@ def main():
                 H_m, W_m = mask_probs_full.shape[-2], mask_probs_full.shape[-1]
                 areas_per_frame = mask_probs_full.reshape(T_total, -1).sum(dim=-1) / (H_m * W_m)  # (T,)
 
+                area_ed = areas_per_frame[ed_frame_idx].item() if ed_frame_idx >= 0 else float("nan")
+                area_es = areas_per_frame[es_frame_idx].item() if es_frame_idx >= 0 else float("nan")
+                ratio = area_ed / max(area_es, 1e-6) if (ed_frame_idx >= 0 and es_frame_idx >= 0) else float("nan")
+
                 print(f"\n=== {case_name} ===")
                 print(f"  c      = {c_val:.6f}")
                 print(f"  gamma  = {gamma_val:.6f}")
                 print(f"  bias   = {bias_val:.6f}")
+                print(f"  area(ED frame {ed_frame_idx}) = {area_ed:.4f}")
+                print(f"  area(ES frame {es_frame_idx}) = {area_es:.4f}")
+                print(f"  ED/ES area ratio              = {ratio:.3f}  {'OK' if ratio > 1.2 else 'FLAT — seg not discriminative'}")
                 print(f"  Areas (normalized, per frame):")
                 for t_idx, a in enumerate(areas_per_frame.cpu().tolist()):
-                    print(f"    frame {t_idx:3d}: {a:.6f}")
+                    tag = " <- ED" if t_idx == ed_frame_idx else (" <- ES" if t_idx == es_frame_idx else "")
+                    print(f"    frame {t_idx:3d}: {a:.6f}{tag}")
 
             results.append({
                 "video": video[0], 
